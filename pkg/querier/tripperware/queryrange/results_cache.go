@@ -265,6 +265,9 @@ func (s resultsCache) shouldCacheResponse(ctx context.Context, req tripperware.R
 	if !s.isAtModifierCachable(ctx, req, maxCacheTime) {
 		return false
 	}
+	if !s.isOffsetCachable(ctx, req) {
+		return false
+	}
 
 	return true
 }
@@ -319,6 +322,45 @@ func (s resultsCache) isAtModifierCachable(ctx context.Context, r tripperware.Re
 	})
 
 	return atModCachable
+}
+
+var negativeOffset = errors.New("negative offset")
+
+func (s resultsCache) isOffsetCachable(ctx context.Context, r tripperware.Request) bool {
+	query := r.GetQuery()
+	if !strings.Contains(query, "offset") {
+		return true
+	}
+	expr, err := parser.ParseExpr(query)
+	if err != nil {
+		level.Warn(util_log.WithContext(ctx, s.logger)).Log("msg", "failed to parse query, considering @ modifier as not cachable", "query", query, "err", err)
+		return false
+	}
+
+	offsetCachable := true
+	parser.Inspect(expr, func(n parser.Node, _ []parser.Node) error {
+		switch e := n.(type) {
+		case *parser.VectorSelector:
+			if e.OriginalOffset < 0 {
+				offsetCachable = false
+				return negativeOffset
+			}
+		case *parser.MatrixSelector:
+			offset := e.VectorSelector.(*parser.VectorSelector).OriginalOffset
+			if offset < 0 {
+				offsetCachable = false
+				return negativeOffset
+			}
+		case *parser.SubqueryExpr:
+			if e.OriginalOffset < 0 {
+				offsetCachable = false
+				return negativeOffset
+			}
+		}
+		return nil
+	})
+
+	return offsetCachable
 }
 
 func getHeaderValuesWithName(r tripperware.Response, headerName string) (headerValues []string) {
